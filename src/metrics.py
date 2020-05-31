@@ -89,3 +89,45 @@ def map_k(recommended_lists, bought_lists, k=5):
         result.append(ap_k(rec, purch, k))
 
     return np.mean(result)
+
+
+def recall(recommended_list, bought_list):
+    bought_list = np.array(bought_list)
+    recommended_list = np.array(recommended_list)
+
+    flags = np.isin(bought_list, recommended_list)
+
+    recall = flags.sum() / len(bought_list)
+
+    return recall
+
+
+def recall_at_k(recommended_list, bought_list, k=5):
+    bought_list = np.array(bought_list)
+    recommended_list = np.array(recommended_list[:k])
+
+    flags = np.isin(bought_list, recommended_list)
+
+    recall = flags.sum() / len(bought_list)
+
+    return recall
+
+
+def money_recall_at_k(recommended_list, bought_list, prices_recommended, bought_prices, k=5):
+    bought_list = np.array(bought_list)
+    bought_prices = np.array(bought_prices[:k])
+
+    recommended_list = np.array(recommended_list[:k])
+    prices_recommended = np.array(prices_recommended[:k])
+
+    flags = np.isin(recommended_list, bought_list)
+
+    recall = np.sum(flags * bought_prices) / np.sum(bought_prices)
+
+    return recall
+
+
+def reciprocal_rank(recommended_list, bought_list):
+    for i, value in enumerate(bought_list):
+        if np.isin(value, recommended_list):
+            return 1/(i + 1)
