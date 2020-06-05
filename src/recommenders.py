@@ -18,6 +18,13 @@ class MainRecommender:
     """
 
     def __init__(self, data, weighted=True):
+
+        self.FILTER_ID = 999999
+
+        self.top_purchases = data.groupby(['item_id'])['quantity'].count().reset_index()
+        self.top_purchases.sort_values('quantity', ascending=False, inplace=True)
+        self.top_purchases = self.top_purchases.loc[self.top_purchases['item_id'] != self.FILTER_ID]
+
         self.user_item_matrix = self.prepare_matrix(data)
         (self.id_to_item_id, self.id_to_user_id,
          self.item_id_to_id, self.user_id_to_id) = self.prepare_dicts(self.user_item_matrix)
@@ -77,11 +84,36 @@ class MainRecommender:
         recommendations = [self.id_to_item_id[rec[0]] for rec in recommendations]
         return recommendations
 
-        # recommendations = self.user_item_matrix.iloc[self.user_id_to_id[user_id]]
-        # recommendations = recommendations[recommendations > 0].index.values
-        # if rec_number > len(recommendations):
-        #     rec_number = len(recommendations)
-        # return recommendations[:rec_number]
+    def update_dict(self, user_id):
+        if user_id not in self.user_id_to_id.values():
+            max_id = max(list(self.user_id_to_id.values()))
+            max_id += 1
+
+            self.user_id_to_id.update({user_id: max_id})
+            self.id_to_user_id.update({max_id: user_id})
+
+    def get_similar_item(self, item_id):
+        rec = self.model.similar_items(self.item_id_to_id[item_id], N=2)
+        return self.id_to_item_id[rec[1][0]]
+
+    def extend_rec_with_popular(self, recommendations, rec_number=5):
+        if len(recommendations) < rec_number:
+            recommendations.extend(self.top_purchases.item_id.tolist())
+            recommendations = recommendations[:rec_number]
+        return recommendations
+
+    def get_recommendations(self, user_id, model, rec_number):
+        self.update_dict(user_id)
+        recommendations = model.recommend(userid=self.user_id_to_id[user_id],
+                                          user_items=csr_matrix(self.user_item_matrix).tocsr(),
+                                          N=rec_number,
+                                          filter_already_liked_items=False,
+                                          filter_items=[self.item_id_to_id[self.FILTER_ID]],
+                                          recalculate_user=True)
+        recommendations = [self.id_to_item_id[rec[0]] for rec in recommendations]
+        recommendations = self.extend_rec_with_popular(recommendations, rec_number=rec_number)
+        assert len(recommendations) == rec_number, f'Количество рекомендаций не равно {rec_number}'
+        return recommendations
 
     @staticmethod
     def fit(user_item_matrix, n_factors=20, regularization=0.001, iterations=15, num_threads=4):
