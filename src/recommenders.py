@@ -6,6 +6,7 @@ from scipy.sparse import csr_matrix
 from implicit.als import AlternatingLeastSquares
 from implicit.nearest_neighbours import ItemItemRecommender
 from implicit.nearest_neighbours import bm25_weight
+from src.utils import unique_list
 
 
 class MainRecommender:
@@ -21,9 +22,14 @@ class MainRecommender:
 
         self.FILTER_ID = 999999
 
-        self.top_purchases = data.groupby(['item_id'])['quantity'].count().reset_index()
+        self.top_purchases = data.groupby(['user_id', 'item_id'])['quantity'].count().reset_index()
         self.top_purchases.sort_values('quantity', ascending=False, inplace=True)
-        self.top_purchases = self.top_purchases.loc[self.top_purchases['item_id'] != self.FILTER_ID]
+        self.top_purchases = self.top_purchases[self.top_purchases['item_id'] != self.FILTER_ID]
+
+        self.overall_top_purchases = data.groupby('item_id')['quantity'].count().reset_index()
+        self.overall_top_purchases.sort_values('quantity', ascending=False, inplace=True)
+        self.overall_top_purchases = self.overall_top_purchases[self.overall_top_purchases['item_id'] != self.FILTER_ID]
+        self.overall_top_purchases = self.overall_top_purchases.item_id.tolist()
 
         self.user_item_matrix = self.prepare_matrix(data)
         (self.id_to_item_id, self.id_to_user_id,
@@ -75,20 +81,12 @@ class MainRecommender:
         return own_recommender
 
     def get_own_recommendations(self, user_id, rec_number=5):
-        recommendations = self.own_recommender.recommend(userid=self.user_id_to_id[user_id],
-                                                         user_items=csr_matrix(self.user_item_matrix).tocsr(),
-                                                         N=rec_number,
-                                                         filter_already_liked_items=False,
-                                                         filter_items=None,
-                                                         recalculate_user=False)
-        recommendations = [self.id_to_item_id[rec[0]] for rec in recommendations]
-        return recommendations
+        self.update_dict(user_id=user_id)
+        return self.get_recommendations(user_id, model=self.own_recommender, rec_number=rec_number)
 
     def update_dict(self, user_id):
-        if user_id not in self.user_id_to_id.values():
-            max_id = max(list(self.user_id_to_id.values()))
-            max_id += 1
-
+        if user_id not in self.user_id_to_id.keys():
+            max_id = max(list(self.user_id_to_id.values())) + 1
             self.user_id_to_id.update({user_id: max_id})
             self.id_to_user_id.update({max_id: user_id})
 
@@ -98,9 +96,9 @@ class MainRecommender:
 
     def extend_rec_with_popular(self, recommendations, rec_number=5):
         if len(recommendations) < rec_number:
-            recommendations.extend(self.top_purchases.item_id.tolist())
-            recommendations = recommendations[:rec_number]
-        return recommendations
+            recommendations.extend(self.overall_top_purchases[:rec_number])
+            recommendations = unique_list(recommendations)
+        return recommendations[:rec_number]
 
     def get_recommendations(self, user_id, model, rec_number):
         self.update_dict(user_id)
@@ -115,6 +113,10 @@ class MainRecommender:
         assert len(recommendations) == rec_number, f'Количество рекомендаций не равно {rec_number}'
         return recommendations
 
+    def get_als_recommendations(self, user_id, rec_number=5):
+        """Рекомендации через стандартные библиотеки implicit"""
+        return self.get_recommendations(user_id, model=self.model, rec_number=rec_number)
+
     @staticmethod
     def fit(user_item_matrix, n_factors=20, regularization=0.001, iterations=15, num_threads=4):
         """Обучает ALS"""
@@ -123,19 +125,17 @@ class MainRecommender:
                                         regularization=regularization,
                                         iterations=iterations,
                                         num_threads=num_threads)
-        model.fit(csr_matrix(user_item_matrix).T.tocsr())
+        model.fit(csr_matrix(user_item_matrix).T.tocsr(), show_progress=False)
 
         return model
 
     def get_similar_items_recommendation(self, user_id, rec_number=5):
         """Рекомендуем товары, похожие на топ-N купленных юзером товаров"""
-        own_items = self.get_own_recommendations(user_id, rec_number)
 
-        recommendations = []
+        top_users_purchases = self.top_purchases[self.top_purchases['user_id'] == user_id].head(rec_number)
 
-        for item_id in own_items:
-            rec = self.model.similar_items(self.item_id_to_id[item_id], N=2)
-            recommendations.append(self.id_to_item_id[rec[1][0]])
+        recommendations = top_users_purchases['item_id'].apply(lambda x: self.get_similar_item(x)).tolist()
+        recommendations = self.extend_rec_with_popular(recommendations, rec_number=rec_number)
 
         assert len(recommendations) == rec_number, f'Количество рекомендаций != {rec_number}'
         return recommendations
@@ -144,16 +144,16 @@ class MainRecommender:
         """Рекомендуем топ-N товаров, среди купленных похожими юзерами"""
 
         users = self.model.similar_users(self.user_id_to_id[user_id], N=n_users + 1)
-        users = [self.id_to_user_id[user[0]] for user in users][1:]
+        users = [user[0] for user in users][1:]
 
         recommendations = []
 
         for user in users:
-            rec = self.get_own_recommendations(user, 1)[0]
-            recommendations.append(rec)
+            recommendations.extend(self.get_own_recommendations(user, min(n_users*3, 9)))
+
+        recommendations = unique_list(recommendations)
+
+        recommendations = self.extend_rec_with_popular(recommendations, n_users)
 
         assert len(recommendations) == n_users, f'Количество рекомендаций != {n_users}'
         return recommendations
-
-    # assert len(res) == N, f'Количество рекомендаций != {N}'
-    # return res
