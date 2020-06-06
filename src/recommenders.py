@@ -76,7 +76,7 @@ class MainRecommender:
         """Обучает модель, которая рекомендует товары, среди товаров, купленных юзером"""
 
         own_recommender = ItemItemRecommender(K=1, num_threads=4)
-        own_recommender.fit(csr_matrix(user_item_matrix).T.tocsr())
+        own_recommender.fit(csr_matrix(user_item_matrix).T.tocsr(), show_progress=False)
 
         return own_recommender
 
