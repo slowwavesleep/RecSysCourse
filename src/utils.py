@@ -1,5 +1,8 @@
 import pandas as pd
 import numpy as np
+import constants
+
+CATEGORY_NAME = constants.post_filter_column
 
 
 def unique_list(sequence):
@@ -55,6 +58,38 @@ def pre_filter_items(data,  take_n_popular=5000, item_features=None):
     return data
 
 
-def post_filter_items(user_id, recommendations):
-    raise NotImplementedError
+def post_filter_items(recommendations, item_features, rec_number):
+    """Пост-фильтрация товаров
 
+    Input
+    -----
+    recommendations: list
+        Ранжированный список item_id для рекомендаций
+    item_info: pd.DataFrame
+        Датафрейм с информацией о товарах
+    """
+
+    unique_recommendations = unique_list(recommendations)
+
+    # Разные категории
+    categories_used = []
+    final_recommendations = []
+
+    for item in unique_recommendations:
+        category = item_features.loc[item_features['item_id'] == item, CATEGORY_NAME].values[0]
+
+        if category not in categories_used:
+            final_recommendations.append(item)
+
+        unique_recommendations.remove(item)
+        categories_used.append(category)
+
+    n_rec = len(final_recommendations)
+    if n_rec < rec_number:
+        final_recommendations.extend(unique_recommendations[:rec_number - n_rec])
+    else:
+        final_recommendations = final_recommendations[:rec_number]
+
+    assert len(final_recommendations) == rec_number, f'Количество рекомендаций != {rec_number}'
+
+    return final_recommendations

@@ -8,6 +8,10 @@ from implicit.nearest_neighbours import ItemItemRecommender
 from implicit.nearest_neighbours import bm25_weight
 from src.utils import unique_list
 
+import constants
+
+FILTER_ID = constants.dummy_id_filter
+
 
 class MainRecommender:
     """Рекоммендации, которые можно получить из ALS
@@ -20,7 +24,7 @@ class MainRecommender:
 
     def __init__(self, data, weighted=True):
 
-        self.FILTER_ID = 999999
+        self.FILTER_ID = FILTER_ID
 
         self.top_purchases = data.groupby(['user_id', 'item_id'])['quantity'].count().reset_index()
         self.top_purchases.sort_values('quantity', ascending=False, inplace=True)
