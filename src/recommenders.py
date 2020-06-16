@@ -6,20 +6,27 @@ from scipy.sparse import csr_matrix
 from implicit.als import AlternatingLeastSquares
 from implicit.nearest_neighbours import ItemItemRecommender
 from implicit.nearest_neighbours import bm25_weight
+
+from lightgbm import LGBMClassifier
+
 from src.utils import unique_list
 
-import constants
+from src.constants import dummy_id_filter
 
-FILTER_ID = constants.dummy_id_filter
+FILTER_ID = dummy_id_filter
 
 
 class MainRecommender:
-    """Рекоммендации, которые можно получить из ALS
+    """First level of the recommendation system. Can be used for initial filtering (selecting candidates)
+     or as an independent model.
 
     Input
     -----
-    user_item_matrix: pd.DataFrame
-        Матрица взаимодействий user-item
+    data: pd.DataFrame
+       Dataframe containing transactions (i.e. purchases) as rows.
+       Must contain the following columns: `user_id`, `item_id`, `quantity`.
+    weighted: Boolean
+       Indicates whether resulting user-item matrix should be weighted.
     """
 
     def __init__(self, data, weighted=True):
@@ -36,6 +43,7 @@ class MainRecommender:
         self.overall_top_purchases = self.overall_top_purchases.item_id.tolist()
 
         self.user_item_matrix = self.prepare_matrix(data)
+
         (self.id_to_item_id, self.id_to_user_id,
          self.item_id_to_id, self.user_id_to_id) = self.prepare_dicts(self.user_item_matrix)
 
@@ -45,9 +53,14 @@ class MainRecommender:
             self.user_item_matrix = bm25_weight(self.user_item_matrix.T).T
 
         self.model = self.fit(self.user_item_matrix)
+        self.item_factors = self.model.item_factors
+        self.user_factors = self.model.user_factors
+
+    # TODO implement rank_items() for ALS
 
     @staticmethod
     def prepare_matrix(data):
+        """Transform the data into an user-item matrix."""
         user_item_matrix = pd.pivot_table(data,
                                           index='user_id', columns='item_id',
                                           values='quantity',
@@ -59,7 +72,7 @@ class MainRecommender:
 
     @staticmethod
     def prepare_dicts(user_item_matrix):
-        """Подготавливает вспомогательные словари"""
+        """Prepares various id to id dictionaries."""
 
         user_ids = user_item_matrix.index.values
         item_ids = user_item_matrix.columns.values
@@ -77,7 +90,7 @@ class MainRecommender:
 
     @staticmethod
     def fit_own_recommender(user_item_matrix):
-        """Обучает модель, которая рекомендует товары, среди товаров, купленных юзером"""
+        """Fits a model that recommends items previously purchased by the user."""
 
         own_recommender = ItemItemRecommender(K=1, num_threads=4)
         own_recommender.fit(csr_matrix(user_item_matrix).T.tocsr(), show_progress=False)
@@ -118,7 +131,7 @@ class MainRecommender:
         return recommendations
 
     def get_als_recommendations(self, user_id, rec_number=5):
-        """Рекомендации через стандартные библиотеки implicit"""
+        """Get recommendations predicted by ALS model."""
         return self.get_recommendations(user_id, model=self.model, rec_number=rec_number)
 
     @staticmethod
@@ -153,7 +166,7 @@ class MainRecommender:
         recommendations = []
 
         for user in users:
-            recommendations.extend(self.get_own_recommendations(user, min(n_users*3, 9)))
+            recommendations.extend(self.get_own_recommendations(user, min(n_users * 3, 9)))
 
         recommendations = unique_list(recommendations)
 
@@ -161,3 +174,28 @@ class MainRecommender:
 
         assert len(recommendations) == n_users, f'Количество рекомендаций != {n_users}'
         return recommendations
+
+
+class SecondLevelRecommender:
+    """Second level of the recommendation system. It is expected that the input will contain data only for
+    a limited amount of candidate items selected by first level model.
+    X: np.Array or pd.DataFrame
+          An array or a dataframe. Each row should contain user_id, item_id and various features to train
+           the model on.
+    y: np.Array
+       An array containing boolean values indicating whether an item was actually purchased by the user.
+    """
+
+    def __init__(self, X, y, categorical_features):
+        self.X = X
+        self.y = y
+        self.categorical_features = categorical_features
+        self.model = LGBMClassifier(objective='binary', max_depth=7, categorical_column=self.categorical_features)
+
+    def fit(self):
+        self.model.fit(self.X, self.y)
+
+    def predict(self, X_train):
+        return self.model.predict_proba(X_train)[:, 1]
+
+# TODO Add feature extractor

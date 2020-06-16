@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
-import constants
+from src.constants import post_filter_column
 
-CATEGORY_NAME = constants.post_filter_column
+CATEGORY_NAME = post_filter_column
 
 
 def unique_list(sequence):
@@ -27,13 +27,13 @@ def pre_filter_items(data,  take_n_popular=5000, item_features=None):
     # Уберем не интересные для рекоммендаций категории (department)
     if item_features is not None:
         department_size = pd.DataFrame(item_features.
-                                       groupby('department')['item_id'].nunique().
+                                       groupby('DEPARTMENT')['PRODUCT_ID'].nunique().
                                        sort_values(ascending=False)).reset_index()
 
-        department_size.columns = ['department', 'n_items']
-        rare_departments = department_size[department_size['n_items'] < 150].department.tolist()
+        department_size.columns = ['DEPARTMENT', 'n_items']
+        rare_departments = department_size[department_size['n_items'] < 150].DEPARTMENT.tolist()
         items_in_rare_departments = item_features[
-            item_features['department'].isin(rare_departments)].item_id.unique().tolist()
+            item_features['DEPARTMENT'].isin(rare_departments)].PRODUCT_ID.unique().tolist()
 
         data = data[~data['item_id'].isin(items_in_rare_departments)]
 

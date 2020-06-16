@@ -1,6 +1,6 @@
 import yaml
 
-with open("config.yml", "r") as file:
+with open("../src/config.yml", "r") as file:
     config = yaml.load(file, Loader=yaml.FullLoader)
 
 post_filter_column = config['post_filter_column']
