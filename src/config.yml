@@ -1,2 +1,3 @@
 post_filter_column: sub_commodity_desc
 dummy_id_filter: 999999
+min_sales: 50

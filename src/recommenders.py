@@ -52,11 +52,21 @@ class MainRecommender:
         if weighted:
             self.user_item_matrix = bm25_weight(self.user_item_matrix.T).T
 
-        self.model = self.fit(self.user_item_matrix)
-        self.item_factors = self.model.item_factors
-        self.user_factors = self.model.user_factors
+        self._model = None
+
+        # self.model = self.fit(self.user_item_matrix)
+        # self.item_factors = self.model.item_factors
+        # self.user_factors = self.model.user_factors
 
     # TODO implement rank_items() for ALS
+
+    @property
+    def model(self):
+        if self._model is None:
+            self.fit()
+            return self._model
+        else:
+            return self._model
 
     @staticmethod
     def prepare_matrix(data):
@@ -123,7 +133,7 @@ class MainRecommender:
                                           user_items=csr_matrix(self.user_item_matrix).tocsr(),
                                           N=rec_number,
                                           filter_already_liked_items=False,
-                                          filter_items=[self.item_id_to_id[self.FILTER_ID]],
+                                          filter_items=None,
                                           recalculate_user=True)
         recommendations = [self.id_to_item_id[rec[0]] for rec in recommendations]
         recommendations = self.extend_rec_with_popular(recommendations, rec_number=rec_number)
@@ -134,17 +144,16 @@ class MainRecommender:
         """Get recommendations predicted by ALS model."""
         return self.get_recommendations(user_id, model=self.model, rec_number=rec_number)
 
-    @staticmethod
-    def fit(user_item_matrix, n_factors=20, regularization=0.001, iterations=15, num_threads=4):
+    def fit(self, n_factors=30, regularization=0.001, iterations=15, num_threads=8):
         """Обучает ALS"""
 
         model = AlternatingLeastSquares(factors=n_factors,
                                         regularization=regularization,
                                         iterations=iterations,
                                         num_threads=num_threads)
-        model.fit(csr_matrix(user_item_matrix).T.tocsr(), show_progress=False)
+        model.fit(csr_matrix(self.user_item_matrix).T.tocsr(), show_progress=False)
 
-        return model
+        self._model = model
 
     def get_similar_items_recommendation(self, user_id, rec_number=5):
         """Рекомендуем товары, похожие на топ-N купленных юзером товаров"""
