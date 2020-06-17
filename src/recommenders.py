@@ -42,7 +42,7 @@ class MainRecommender:
         self.overall_top_purchases = self.overall_top_purchases[self.overall_top_purchases['item_id'] != self.FILTER_ID]
         self.overall_top_purchases = self.overall_top_purchases.item_id.tolist()
 
-        self.user_item_matrix = self.prepare_matrix(data)
+        self._user_item_matrix = self.prepare_matrix(data)
 
         (self.id_to_item_id, self.id_to_user_id,
          self.item_id_to_id, self.user_id_to_id) = self.prepare_dicts(self.user_item_matrix)
@@ -50,15 +50,15 @@ class MainRecommender:
         self.own_recommender = self.fit_own_recommender(self.user_item_matrix)
 
         if weighted:
-            self.user_item_matrix = bm25_weight(self.user_item_matrix.T).T
+            self._user_item_matrix = bm25_weight(self.user_item_matrix.T).T
 
         self._model = None
 
-        # self.model = self.fit(self.user_item_matrix)
-        # self.item_factors = self.model.item_factors
-        # self.user_factors = self.model.user_factors
-
     # TODO implement rank_items() for ALS
+
+    @property
+    def user_item_matrix(self):
+        return self._user_item_matrix
 
     @property
     def model(self):
@@ -67,6 +67,18 @@ class MainRecommender:
             return self._model
         else:
             return self._model
+
+    @property
+    def item_factors(self):
+        if self._model is None:
+            self.fit()
+        return self.model.item_factors
+
+    @property
+    def user_factors(self):
+        if self._model is None:
+            self.fit()
+        return self.model.user_factors
 
     @staticmethod
     def prepare_matrix(data):
@@ -137,7 +149,7 @@ class MainRecommender:
                                           recalculate_user=True)
         recommendations = [self.id_to_item_id[rec[0]] for rec in recommendations]
         recommendations = self.extend_rec_with_popular(recommendations, rec_number=rec_number)
-        assert len(recommendations) == rec_number, f'Количество рекомендаций не равно {rec_number}'
+        assert len(recommendations) == rec_number, f'Number of recommendations is not equal to {rec_number}'
         return recommendations
 
     def get_als_recommendations(self, user_id, rec_number=5):
@@ -145,7 +157,7 @@ class MainRecommender:
         return self.get_recommendations(user_id, model=self.model, rec_number=rec_number)
 
     def fit(self, n_factors=30, regularization=0.001, iterations=15, num_threads=8):
-        """Обучает ALS"""
+        """Fit ALS model."""
 
         model = AlternatingLeastSquares(factors=n_factors,
                                         regularization=regularization,
@@ -156,18 +168,18 @@ class MainRecommender:
         self._model = model
 
     def get_similar_items_recommendation(self, user_id, rec_number=5):
-        """Рекомендуем товары, похожие на топ-N купленных юзером товаров"""
+        """Recommend a similar item for each of user's top N most bought items."""
 
         top_users_purchases = self.top_purchases[self.top_purchases['user_id'] == user_id].head(rec_number)
 
         recommendations = top_users_purchases['item_id'].apply(lambda x: self.get_similar_item(x)).tolist()
         recommendations = self.extend_rec_with_popular(recommendations, rec_number=rec_number)
 
-        assert len(recommendations) == rec_number, f'Количество рекомендаций != {rec_number}'
+        assert len(recommendations) == rec_number, f'Number of recommendations is not equal to {rec_number}'
         return recommendations
 
     def get_similar_users_recommendation(self, user_id, n_users=5):
-        """Рекомендуем топ-N товаров, среди купленных похожими юзерами"""
+        """Recommend an item for top N of a user's most similar users."""
 
         users = self.model.similar_users(self.user_id_to_id[user_id], N=n_users + 1)
         users = [user[0] for user in users][1:]
@@ -181,7 +193,7 @@ class MainRecommender:
 
         recommendations = self.extend_rec_with_popular(recommendations, n_users)
 
-        assert len(recommendations) == n_users, f'Количество рекомендаций != {n_users}'
+        assert len(recommendations) == n_users, f'Number of recommendations is not equal to {n_users}'
         return recommendations
 
     def df_als_predictions(self, data, rec_number=200):
@@ -207,8 +219,8 @@ class SecondLevelRecommender:
         self.model.fit(X_train, y_train)
 
     def predict(self, X_test):
-        preds = self.model.predict_proba(X_test)[:, 1]
-        return preds
+        """Predict probability of purchase for each item."""
+        return self.model.predict_proba(X_test)[:, 1]
 
 
 class DataTransformer:
@@ -219,9 +231,13 @@ class DataTransformer:
 
         self.user_features = user_features
         self.user_features.columns = [col.lower() for col in self.user_features.columns]
+        self.user_features.rename(columns={'household_key': 'user_id'}, inplace=True)
 
         self.item_features = item_features
         self.item_features.columns = [col.lower() for col in self.item_features.columns]
+        self.item_features.rename(columns={'product_id': 'item_id'}, inplace=True)
+
+        self.data = self.data.merge(self.item_features[['item_id', 'commodity_desc']], on='item_id', how='left')
 
     def train_test_split(self, valid_1_weeks=6, valid_2_weeks=3):
 
@@ -235,6 +251,21 @@ class DataTransformer:
         data_valid_2 = self.data[self.data['week_no'] >= self.data['week_no'].max() - valid_2_weeks]
 
         return data_train_1, data_valid_1, data_train_2, data_valid_2
+
+    def transform(self):
+        """Adds all the additional columns to the dataframe and modifies it as to make it
+        usable for second level recommender. Returns transformed data."""
+        raise NotImplementedError
+
+    @property
+    def user_avg_basket_price(self):
+        return self.data.groupby(['user_id', 'basket_id'])['sales_value'].sum().groupby('user_id').mean()
+
+    @property
+    def purchases_in_category(self):
+        purchases_in_category = self.data.groupby(['user_id', 'commodity_desc'])['basket_id'].count()
+        purchases_in_category.name = 'purchases_in_category'
+        return purchases_in_category
 
     @staticmethod
     def valid_items(data_valid, data_train=None, warm_start=True):
