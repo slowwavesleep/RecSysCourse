@@ -10,7 +10,7 @@ from implicit.nearest_neighbours import bm25_weight
 from lightgbm import LGBMClassifier
 
 from src.utils import unique_list
-
+from src.metrics import recall_at_k, precision_at_k
 from src.constants import dummy_id_filter
 
 FILTER_ID = dummy_id_filter
@@ -184,6 +184,10 @@ class MainRecommender:
         assert len(recommendations) == n_users, f'Количество рекомендаций != {n_users}'
         return recommendations
 
+    def df_als_predictions(self, data, rec_number=200):
+        data['als_candidates'] = data['user_id'].apply(lambda x: self.get_als_recommendations(x, rec_number))
+        return data
+
 
 class SecondLevelRecommender:
     """Second level of the recommendation system. It is expected that the input will contain data only for
@@ -195,16 +199,66 @@ class SecondLevelRecommender:
        An array containing boolean values indicating whether an item was actually purchased by the user.
     """
 
-    def __init__(self, X, y, categorical_features):
-        self.X = X
-        self.y = y
+    def __init__(self, categorical_features):
         self.categorical_features = categorical_features
         self.model = LGBMClassifier(objective='binary', max_depth=7, categorical_column=self.categorical_features)
 
-    def fit(self):
-        self.model.fit(self.X, self.y)
+    def fit(self, X_train, y_train):
+        self.model.fit(X_train, y_train)
 
-    def predict(self, X_train):
-        return self.model.predict_proba(X_train)[:, 1]
+    def predict(self, X_test):
+        preds = self.model.predict_proba(X_test)[:, 1]
+        return preds
 
-# TODO Add feature extractor
+
+class DataTransformer:
+
+    def __init__(self, data, user_features, item_features):
+
+        self.data = data
+
+        self.user_features = user_features
+        self.user_features.columns = [col.lower() for col in self.user_features.columns]
+
+        self.item_features = item_features
+        self.item_features.columns = [col.lower() for col in self.item_features.columns]
+
+    def train_test_split(self, valid_1_weeks=6, valid_2_weeks=3):
+
+        data_train_1 = self.data[self.data['week_no'] < self.data['week_no'].max() - (valid_1_weeks + valid_2_weeks)]
+
+        data_valid_1 = self.data[
+            (self.data['week_no'] >= self.data['week_no'].max() - (valid_1_weeks + valid_2_weeks)) &
+            (self.data['week_no'] < self.data['week_no'].max() - valid_2_weeks)]
+
+        data_train_2 = data_valid_1.copy()
+        data_valid_2 = self.data[self.data['week_no'] >= self.data['week_no'].max() - valid_2_weeks]
+
+        return data_train_1, data_valid_1, data_train_2, data_valid_2
+
+    @staticmethod
+    def valid_items(data_valid, data_train=None, warm_start=True):
+
+        result = data_valid.groupby('user_id')['item_id'].unique().reset_index()
+
+        if warm_start and data_train is not None:
+            train_users = data_train['user_id'].unique()
+            result = result.loc[result.user_id.isin(train_users)]
+
+        result.columns = ['user_id', 'actual']
+
+        return result
+
+    @staticmethod
+    def eval_recall_at_k(data, eval_column, k=200):
+        recall = data[data[eval_column].notna()]. \
+            apply(lambda row: recall_at_k(row[eval_column], row['actual'], k), axis=1).mean()
+        return recall
+
+    @staticmethod
+    def eval_precision_at_k(data, eval_column, k=5):
+        precision = data[data[eval_column].notna()]. \
+            apply(lambda row: precision_at_k(row[eval_column], row['actual'], k), axis=1).mean()
+        return precision
+
+
