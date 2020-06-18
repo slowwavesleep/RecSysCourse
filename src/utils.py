@@ -113,6 +113,6 @@ def post_filter_items(recommendations, item_features, rec_number):
     else:
         final_recommendations = final_recommendations[:rec_number]
 
-    assert len(final_recommendations) == rec_number, f'Количество рекомендаций != {rec_number}'
+    assert len(final_recommendations) == rec_number, f'Number of recommendations is not equal to {rec_number}'
 
     return final_recommendations
