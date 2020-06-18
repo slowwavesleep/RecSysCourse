@@ -8,6 +8,20 @@ MIN_SALES = min_sales
 LAST_YEAR_WEEKS = 53
 
 
+def train_test_split(data, valid_1_weeks=6, valid_2_weeks=3):
+    """Splits data into four parts: level 1 train, level 1 valid, level 2 train, level 2 valid."""
+    data_train_1 = data[data['week_no'] < data['week_no'].max() - (valid_1_weeks + valid_2_weeks)]
+
+    data_valid_1 = data[
+        (data['week_no'] >= data['week_no'].max() - (valid_1_weeks + valid_2_weeks)) &
+        (data['week_no'] < data['week_no'].max() - valid_2_weeks)]
+
+    data_train_2 = data_valid_1.copy()
+    data_valid_2 = data[data['week_no'] >= data['week_no'].max() - valid_2_weeks]
+
+    return data_train_1, data_valid_1, data_train_2, data_valid_2
+
+
 def unique_list(sequence):
     seen = set()
     return [x for x in sequence if not (x in seen or seen.add(x))]
@@ -28,6 +42,7 @@ def pre_filter_items(data,  take_n_popular=5000, item_features=None):
 
         data = data[~data['item_id'].isin(items_in_rare_departments)]
 
+    # TODO consider taking discount into account
     # filter out items that are too cheap
     data['price'] = data['sales_value'] / (np.maximum(data['quantity'], 1))
     data = data.loc[data['price'] > 2]
@@ -68,19 +83,18 @@ def pre_filter_items(data,  take_n_popular=5000, item_features=None):
 
 
 def post_filter_items(recommendations, item_features, rec_number):
-    """Пост-фильтрация товаров
-
+    """Post filter recommended items.
     Input
     -----
     recommendations: list
-        Ранжированный список item_id для рекомендаций
-    item_info: pd.DataFrame
-        Датафрейм с информацией о товарах
+        Ranked (in descending order) list of recommended items (as `item_id`).
+    item_features: pd.DataFrame
+        Dataframe containing item features.
     """
 
     unique_recommendations = unique_list(recommendations)
 
-    # Разные категории
+    # different categories
     categories_used = []
     final_recommendations = []
 

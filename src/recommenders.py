@@ -224,7 +224,7 @@ class SecondLevelRecommender:
 
 
 class DataTransformer:
-
+    """This class is used bring train and valid datasets to a unified format."""
     def __init__(self, data, user_features, item_features):
 
         self.data = data
@@ -239,18 +239,9 @@ class DataTransformer:
 
         self.data = self.data.merge(self.item_features[['item_id', 'commodity_desc']], on='item_id', how='left')
 
-    def train_test_split(self, valid_1_weeks=6, valid_2_weeks=3):
+        self.data['month'] = self.data['week_no'].apply(lambda x: np.ceil(x / 30).astype('int32'))
 
-        data_train_1 = self.data[self.data['week_no'] < self.data['week_no'].max() - (valid_1_weeks + valid_2_weeks)]
-
-        data_valid_1 = self.data[
-            (self.data['week_no'] >= self.data['week_no'].max() - (valid_1_weeks + valid_2_weeks)) &
-            (self.data['week_no'] < self.data['week_no'].max() - valid_2_weeks)]
-
-        data_train_2 = data_valid_1.copy()
-        data_valid_2 = self.data[self.data['week_no'] >= self.data['week_no'].max() - valid_2_weeks]
-
-        return data_train_1, data_valid_1, data_train_2, data_valid_2
+        self.data['weekend'] = self.data.day.apply(lambda x: True if (x == 6) or (x == 7) else False)
 
     def transform(self):
         """Adds all the additional columns to the dataframe and modifies it as to make it
@@ -262,10 +253,22 @@ class DataTransformer:
         return self.data.groupby(['user_id', 'basket_id'])['sales_value'].sum().groupby('user_id').mean()
 
     @property
+    def total_purchases(self):
+        total_purchases = self.data.groupby('user_id')['basket_id'].nunique()
+        total_purchases.name = 'total_purchases'
+        return total_purchases
+
+    @property
     def purchases_in_category(self):
         purchases_in_category = self.data.groupby(['user_id', 'commodity_desc'])['basket_id'].count()
         purchases_in_category.name = 'purchases_in_category'
         return purchases_in_category
+
+    @property
+    def purchases_per_month(self):
+        purchases_per_month = self.data.groupby(['user_id', 'month'])['basket_id'].nunique()
+        purchases_per_month.name = 'purchases_per_month'
+        return purchases_per_month.groupby('user_id').mean()
 
     @staticmethod
     def valid_items(data_valid, data_train=None, warm_start=True):
