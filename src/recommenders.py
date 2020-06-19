@@ -237,20 +237,108 @@ class DataTransformer:
         self.item_features.columns = [col.lower() for col in self.item_features.columns]
         self.item_features.rename(columns={'product_id': 'item_id'}, inplace=True)
 
-        self.data = self.data.merge(self.item_features[['item_id', 'commodity_desc']], on='item_id', how='left')
+        self.data = self.data.merge(self.item_features, on='item_id', how='left')
+        # self.data = self.data.merge(self.user_features, on='user_id', how='left')
 
         self.data['month'] = self.data['week_no'].apply(lambda x: np.ceil(x / 30).astype('int32'))
 
         self.data['weekend'] = self.data.day.apply(lambda x: True if (x == 6) or (x == 7) else False)
 
+        # save categorical column names for ease of access
+        self.categorical = ['manufacturer', 'department', 'brand', 'commodity_desc', 'sub_commodity_desc',
+                            'curr_size_of_product', 'age_desc', 'marital_status_code', 'income_desc', 'homeowner_desc',
+                            'hh_comp_desc', 'household_size_desc', 'kid_category_desc', 'weekend']
+
     def transform(self):
         """Adds all the additional columns to the dataframe and modifies it as to make it
         usable for second level recommender. Returns transformed data."""
-        raise NotImplementedError
+
+        # TODO merge with features instead
+
+        # merge with custom features
+        self.user_features = self.user_features.merge(self.weekend_purchases_ratio, on='user_id', how='left')
+        self.user_features = self.user_features.merge(self.user_avg_basket_price, on='user_id', how='left')
+        # self.user_features = self.user_features.merge(self.purchases_in_category,
+        #                                               on=['user_id', 'commodity_desc'], how='left')
+        self.user_features = self.user_features.merge(self.purchases_per_month, on='user_id', how='left')
+
+        # TODO fill after merging
+
+        # fill missing values
+        self.user_features.income_desc = self.user_features.income_desc.fillna('Unknown')
+        self.user_features.homeowner_desc = self.user_features.homeowner_desc.fillna('Unknown')
+        self.user_features.hh_comp_desc = self.user_features.hh_comp_desc.fillna('Unknown')
+        self.user_features.household_size_desc = self.user_features.household_size_desc.fillna('Unknown')
+        self.user_features.kid_category_desc = self.user_features.kid_category_desc.replace('None/Unknown', 'Unknown').\
+            fillna('Unknown')
+        self.user_features.age_desc = self.user_features.age_desc.fillna('Unknown')
+        self.user_features.marital_status_code = self.user_features.marital_status_code.fillna('U')
+
+
+    def time_format(self):
+
+        def fix_time(time):
+            if len(time) == 1:
+                return '00:0' + time
+            elif len(time) == 2:
+                return '00:' + time
+            elif len(time) == 3:
+                time = time[:1] + ':' + time[1:]
+                return '0' + time
+            else:
+                time = time[:2] + ':' + time[2:]
+                return time
+
+        time = self.data.trans_time.astype(str)
+        time = time.apply(fix_time)
+        time = pd.to_datetime(time, format='%H:%M').dt.time
+        return time
+
+    # time consuming method
+    def add_purchases_hours_cat(self):
+
+        self.data['trans_time_type'] = self.trans_time_type
+        self.categorical.append('trans_time_type')
+
+
+    @property
+    def trans_time_type(self):
+
+        time = self.time_format()
+
+        def work_hours(time):
+            four_am = pd.to_datetime('04:00', format='%H:%M').time()
+            nine_am = pd.to_datetime('09:00', format='%H:%M').time()
+            six_pm = pd.to_datetime('18:00', format='%H:%M').time()
+
+            if four_am <= time < nine_am:
+                return 'before_wh'
+            elif nine_am <= time < six_pm:
+                return 'during_wh'
+            else:
+                return 'after_wh'
+
+        return time.apply(work_hours)
+
+    @property
+    def weekend_purchases_ratio(self):
+        df = pd.merge(self.total_purchases, self.weekend_purchases, on='user_id')
+        weekend_purchases_ratio = df.apply(lambda row: row['weekend_purchases'] / row['total_purchases'], axis=1)
+        weekend_purchases_ratio.name = 'weekend_purchases_ratio'
+        return weekend_purchases_ratio
 
     @property
     def user_avg_basket_price(self):
-        return self.data.groupby(['user_id', 'basket_id'])['sales_value'].sum().groupby('user_id').mean()
+        user_avg_basket_price = self.data.groupby(['user_id', 'basket_id'])['sales_value'].\
+            sum().groupby('user_id').mean()
+        user_avg_basket_price.name = 'user_avg_basket_price'
+        return user_avg_basket_price
+
+    @property
+    def weekend_purchases(self):
+        weekend_purchases = self.data.groupby('user_id')['weekend'].sum()
+        weekend_purchases.name = 'weekend_purchases'
+        return weekend_purchases
 
     @property
     def total_purchases(self):
@@ -275,7 +363,7 @@ class DataTransformer:
 
         result = data_valid.groupby('user_id')['item_id'].unique().reset_index()
 
-        if warm_start and data_train is not None:
+        if warm_start and (data_train is not None):
             train_users = data_train['user_id'].unique()
             result = result.loc[result.user_id.isin(train_users)]
 
