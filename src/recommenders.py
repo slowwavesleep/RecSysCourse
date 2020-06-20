@@ -9,7 +9,7 @@ from implicit.nearest_neighbours import bm25_weight
 
 from lightgbm import LGBMClassifier
 
-from src.utils import unique_list
+from src.utils import unique_list, post_filter_items
 from src.metrics import recall_at_k, precision_at_k
 from src.constants import dummy_id_filter
 
@@ -213,6 +213,23 @@ class MainRecommender:
         data['als_candidates'] = data['user_id'].apply(lambda x: self.get_als_recommendations(x, rec_number))
         return data
 
+    def rank_items(self, user_id, recommendations, select=None):
+        recommendations = self.model.rank_items(self.user_id_to_id[user_id],
+                                     csr_matrix(self.user_item_matrix).tocsr(),
+                                     [self.item_id_to_id[rec] for rec in recommendations])
+        recommendations = [self.id_to_item_id[rec[0]] for rec in recommendations]
+        if select:
+            return recommendations[:select]
+        return recommendations
+
+    def df_als_predictions_ranked(self, data, rec_number=200, select=None):
+        df = self.df_als_predictions(data, rec_number)
+        df['als_candidates'] = df.apply(lambda row: self.rank_items(row['user_id'],
+                                                                    row['als_candidates'],
+                                                                    select=select),
+                                        axis=1)
+        return df
+
 
 class SecondLevelRecommender:
     """Second level of the recommendation system. It is expected that the input will contain data only for
@@ -224,9 +241,10 @@ class SecondLevelRecommender:
        An array containing boolean values indicating whether an item was actually purchased by the user.
     """
 
-    def __init__(self, data, categories):
+    def __init__(self, data, categories, overall_top_purchases):
         self.categories = categories
         self.data = data
+        self.overall_top_purchases = overall_top_purchases
 
         self.x = self.data.drop('target', axis=1)
         self.x = self.x[self.categories].astype('category')
@@ -238,8 +256,9 @@ class SecondLevelRecommender:
                                     categorical_column=self.categories,
                                     num_iterations=100,
                                     num_leaves=100,
-                                    dart=True,
-                                    scale_pos_weight=0.03
+                                    scale_pos_weight=99,
+                                    max_bin=500,
+                                    cat_smooth=1000
                                     )
 
     def fit(self):
@@ -249,12 +268,20 @@ class SecondLevelRecommender:
         """Predict probability of purchase for each item."""
         return self.model.predict_proba(self.x)[:, 1]
 
-    def df_predict(self):
+    def df_predict(self, rec_number):
         self.data['preds'] = self.predict()
         self.data.sort_values(['user_id', 'preds'], ascending=[True, False], inplace=True)
-        lgb_candidates = self.data.groupby('user_id').head(5).groupby('user_id')['item_id'].unique().reset_index()
+        lgb_candidates = self.data.groupby('user_id').head(rec_number).groupby('user_id')['item_id'].unique()\
+            .reset_index()
         lgb_candidates.columns = ['user_id', 'candidates']
+        lgb_candidates.candidates = lgb_candidates.candidates.apply(lambda x: self.extend_rec_with_popular(x.tolist()))
         return lgb_candidates
+
+    def extend_rec_with_popular(self, recommendations, rec_number=5):
+        if len(recommendations) < rec_number:
+            recommendations.extend(self.overall_top_purchases[:rec_number])
+            recommendations = unique_list(recommendations)
+        return recommendations[:rec_number]
 
     @staticmethod
     def eval_prediction(valid_data, candidates):
