@@ -53,6 +53,8 @@ class MainRecommender:
             self._user_item_matrix = bm25_weight(self.user_item_matrix.T).T
 
         self._model = None
+        self._user_factors = None
+        self._item_factors = None
 
     # TODO implement rank_items() for ALS
 
@@ -72,13 +74,24 @@ class MainRecommender:
     def item_factors(self):
         if self._model is None:
             self.fit()
-        return self.model.item_factors
+        if self._item_factors is None:
+            ids = pd.DataFrame.from_dict(self.id_to_item_id, orient='index', columns=['item_id'])
+            self._item_factors = pd.DataFrame(self.model.item_factors)
+            self._item_factors = ids.merge(self._item_factors, left_index=True, right_index=True)
+            self._item_factors.columns = ['item_id'] + [f'item_factor_{i}' for i in range(1, self.model.factors+1)]
+        return self._item_factors
 
     @property
     def user_factors(self):
         if self._model is None:
             self.fit()
-        return self.model.user_factors
+        if self._user_factors is None:
+            ids = pd.DataFrame.from_dict(self.id_to_user_id, orient='index', columns=['user_id'])
+            self._user_factors = pd.DataFrame(self.model.user_factors)
+            self._user_factors = ids.merge(self.user_factors, left_index=True, right_index=True)
+            self._user_factors.columns = ['user_id'] + [f'user_factor_{i}' for i in range(1, self.model.factors + 1)]
+
+        return self._user_factors
 
     @staticmethod
     def prepare_matrix(data):
@@ -211,16 +224,46 @@ class SecondLevelRecommender:
        An array containing boolean values indicating whether an item was actually purchased by the user.
     """
 
-    def __init__(self, categorical_features):
-        self.categorical_features = categorical_features
-        self.model = LGBMClassifier(objective='binary', max_depth=7, categorical_column=self.categorical_features)
+    def __init__(self, data, categories):
+        self.categories = categories
+        self.data = data
 
-    def fit(self, X_train, y_train):
-        self.model.fit(X_train, y_train)
+        self.x = self.data.drop('target', axis=1)
+        self.x = self.x[self.categories].astype('category')
+        self.y = self.data['target']
 
-    def predict(self, X_test):
+        self.model = LGBMClassifier(objective='binary',
+                                    max_depth=10,
+                                    learning_rate=0.001,
+                                    categorical_column=self.categories,
+                                    num_iterations=100,
+                                    num_leaves=100,
+                                    dart=True,
+                                    scale_pos_weight=0.03
+                                    )
+
+    def fit(self):
+        self.model.fit(self.x, self.y)
+
+    def predict(self):
         """Predict probability of purchase for each item."""
-        return self.model.predict_proba(X_test)[:, 1]
+        return self.model.predict_proba(self.x)[:, 1]
+
+    def df_predict(self):
+        self.data['preds'] = self.predict()
+        self.data.sort_values(['user_id', 'preds'], ascending=[True, False], inplace=True)
+        lgb_candidates = self.data.groupby('user_id').head(5).groupby('user_id')['item_id'].unique().reset_index()
+        lgb_candidates.columns = ['user_id', 'candidates']
+        return lgb_candidates
+
+    @staticmethod
+    def eval_prediction(valid_data, candidates):
+        valid_data = valid_data.groupby('user_id')['item_id'].unique().reset_index()\
+            .rename(columns={'item_id': 'actual'})
+        valid_data = valid_data.merge(candidates, on='user_id', how='inner')
+        precision = valid_data[valid_data.candidates.notna()]. \
+            apply(lambda row: precision_at_k(row['candidates'], row['actual'], k=5), axis=1).mean()
+        return precision
 
 
 class DataTransformer:
@@ -238,7 +281,6 @@ class DataTransformer:
         self.item_features.rename(columns={'product_id': 'item_id'}, inplace=True)
 
         self.data = self.data.merge(self.item_features, on='item_id', how='left')
-        # self.data = self.data.merge(self.user_features, on='user_id', how='left')
 
         self.data['month'] = self.data['week_no'].apply(lambda x: np.ceil(x / 30).astype('int32'))
 
@@ -247,7 +289,7 @@ class DataTransformer:
         # save categorical column names for ease of access
         self.categorical = ['manufacturer', 'department', 'brand', 'commodity_desc', 'sub_commodity_desc',
                             'curr_size_of_product', 'age_desc', 'marital_status_code', 'income_desc', 'homeowner_desc',
-                            'hh_comp_desc', 'household_size_desc', 'kid_category_desc', 'weekend']
+                            'hh_comp_desc', 'household_size_desc', 'kid_category_desc']
 
     def transform(self):
         """Adds all the additional columns to the dataframe and modifies it as to make it
@@ -257,10 +299,20 @@ class DataTransformer:
 
         # merge with custom features
         self.user_features = self.user_features.merge(self.weekend_purchases_ratio, on='user_id', how='left')
+        self.user_features.weekend_purchases_ratio = self.user_features.weekend_purchases_ratio.fillna(0)
+
         self.user_features = self.user_features.merge(self.user_avg_basket_price, on='user_id', how='left')
+        self.user_features.user_avg_basket_price = self.user_features.user_avg_basket_price.fillna(
+            self.user_features.user_avg_basket_price.mean()
+        )
+
         # self.user_features = self.user_features.merge(self.purchases_in_category,
         #                                               on=['user_id', 'commodity_desc'], how='left')
+
         self.user_features = self.user_features.merge(self.purchases_per_month, on='user_id', how='left')
+        self.user_features.purchases_per_month = self.user_features.purchases_per_month.fillna(
+            self.user_features.purchases_per_month.mean()
+        )
 
         # TODO fill after merging
 
@@ -274,6 +326,58 @@ class DataTransformer:
         self.user_features.age_desc = self.user_features.age_desc.fillna('Unknown')
         self.user_features.marital_status_code = self.user_features.marital_status_code.fillna('U')
 
+    def prepare_train_df(self, data_train_1, data_train_2, recommender):
+
+        users_lvl_2 = pd.DataFrame(data_train_2['user_id'].unique())
+        users_lvl_2.columns = ['user_id']
+
+        train_users = data_train_1['user_id'].unique()
+        users_lvl_2 = users_lvl_2[users_lvl_2['user_id'].isin(train_users)]
+
+        users_lvl_2['candidates'] = users_lvl_2['user_id'].apply(lambda x: recommender.get_own_recommendations(x, 200))
+
+        s = users_lvl_2.apply(lambda x: pd.Series(x['candidates']), axis=1).stack().reset_index(level=1, drop=True)
+        s.name = 'item_id'
+
+        users_lvl_2 = users_lvl_2.drop('candidates', axis=1).join(s)
+        users_lvl_2['flag'] = 1
+
+        targets_lvl_2 = data_train_2[['user_id', 'item_id']].copy()
+        targets_lvl_2['target'] = 1
+
+        targets_lvl_2 = users_lvl_2.merge(targets_lvl_2, on=['user_id', 'item_id'], how='left')
+
+        targets_lvl_2['target'].fillna(0, inplace=True)
+        targets_lvl_2.drop('flag', axis=1, inplace=True)
+
+        targets_lvl_2 = targets_lvl_2.merge(self.item_features, on='item_id', how='left')
+        targets_lvl_2 = targets_lvl_2.merge(self.user_features, on='user_id', how='left')
+        targets_lvl_2 = targets_lvl_2.merge(self.purchases_in_category, on=['user_id', 'commodity_desc'],
+                                            how='left')
+        targets_lvl_2.purchases_in_category = targets_lvl_2.purchases_in_category.fillna(0)
+
+        targets_lvl_2.weekend_purchases_ratio = targets_lvl_2.weekend_purchases_ratio.fillna(0)
+
+        targets_lvl_2.user_avg_basket_price = targets_lvl_2.user_avg_basket_price.fillna(
+            self.user_features.user_avg_basket_price.mean()
+        )
+
+        targets_lvl_2.purchases_per_month = targets_lvl_2.purchases_per_month.fillna(
+            self.user_features.purchases_per_month.mean()
+        )
+
+        targets_lvl_2.income_desc = targets_lvl_2.income_desc.fillna('Unknown')
+        targets_lvl_2.homeowner_desc = targets_lvl_2.homeowner_desc.fillna('Unknown')
+        targets_lvl_2.hh_comp_desc = targets_lvl_2.hh_comp_desc.fillna('Unknown')
+        targets_lvl_2.household_size_desc = targets_lvl_2.household_size_desc.fillna('Unknown')
+        targets_lvl_2.kid_category_desc = targets_lvl_2.kid_category_desc.fillna('Unknown')
+        targets_lvl_2.age_desc = targets_lvl_2.age_desc.fillna('Unknown')
+        targets_lvl_2.marital_status_code = targets_lvl_2.marital_status_code.fillna('U')
+
+        targets_lvl_2 = targets_lvl_2.merge(recommender.item_factors, on='item_id', how='left')
+        targets_lvl_2 = targets_lvl_2.merge(recommender.user_factors, on='user_id', how='left')
+
+        return targets_lvl_2
 
     def time_format(self):
 
@@ -299,7 +403,6 @@ class DataTransformer:
 
         self.data['trans_time_type'] = self.trans_time_type
         self.categorical.append('trans_time_type')
-
 
     @property
     def trans_time_type(self):
